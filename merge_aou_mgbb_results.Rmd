@@ -1,0 +1,470 @@
+---
+title: "merge AoU and MGBB sumTab"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(pROC)
+options(bitmapType='cairo')
+
+```
+
+# exacerbations NB
+
+```{r}
+sumTab_nb_mgb <- read.delim("/path/to/asthma_biologics/output/exac_sumTab_nb.txt", sep = "\t", header = TRUE)
+sumTab_nb_aou <- read.delim("/path/to/asthma_biologics/output/exac_sumTab_nb_aou.txt", sep = "\t", header = TRUE)
+
+sumTab_nb <- merge(
+  sumTab_nb_mgb, sumTab_nb_aou, 
+  by = c("drug_group", "predictor"),
+  suffixes = c("_mgb", "_aou"),
+  all = FALSE
+)
+sumTab_nb <- sumTab_nb %>% 
+  arrange(drug_group, pval_mgb) %>% 
+  dplyr::select(-c("outcome_mgb", "outcome_aou"))
+
+DT::datatable(sumTab_nb, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_nb_dupi <- sumTab_nb %>% filter(drug_group == "Dupilumab") 
+DT::datatable(sumTab_nb_dupi, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_nb_il5 <- sumTab_nb %>% filter(drug_group == "IL5") 
+DT::datatable(sumTab_nb_il5, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_nb_oma <- sumTab_nb %>% filter(drug_group == "Omalizumab") 
+DT::datatable(sumTab_nb_oma, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_nb_wide <- sumTab_nb %>%
+  dplyr::select(predictor,drug_group,pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou) %>%
+  pivot_wider(names_from = drug_group, values_from = c(pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou))
+DT::datatable(sumTab_nb_wide, options = list(pageLength = 15, autoWidth = TRUE, scrollX = '400px'))
+```
+
+# exacerbation NB remove zeros
+
+```{r}
+sumTab_nb_rm0_mgb <- read.delim("/path/to/asthma_biologics/output/exac_sumTab_nb_rm0.txt", sep = "\t", header = TRUE)
+sumTab_nb_rm0_aou <- read.delim("/path/to/asthma_biologics/output/exac_sumTab_nb_rm0_aou.txt", sep = "\t", header = TRUE)
+
+sumTab_nb_rm0 <- merge(
+  sumTab_nb_rm0_mgb, sumTab_nb_rm0_aou, 
+  by = c("drug_group", "predictor"),
+  suffixes = c("_mgb", "_aou"),
+  all = FALSE
+)
+sumTab_nb_rm0 <- sumTab_nb_rm0 %>% 
+  arrange(drug_group, pval_mgb) %>% 
+  dplyr::select(-c("outcome_mgb", "outcome_aou"))
+
+DT::datatable(sumTab_nb_rm0, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_nb_rm0_dupi <- sumTab_nb_rm0 %>% filter(drug_group == "Dupilumab") 
+DT::datatable(sumTab_nb_rm0_dupi, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_nb_rm0_il5 <- sumTab_nb_rm0 %>% filter(drug_group == "IL5") 
+DT::datatable(sumTab_nb_rm0_il5, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_nb_rm0_oma <- sumTab_nb_rm0 %>% filter(drug_group == "Omalizumab") 
+DT::datatable(sumTab_nb_rm0_oma, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_nb_rm0_wide <- sumTab_nb_rm0 %>%
+  dplyr::select(predictor,drug_group,pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou) %>%
+  pivot_wider(names_from = drug_group, values_from = c(pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou))
+DT::datatable(sumTab_nb_rm0_wide, options = list(pageLength = 15, autoWidth = TRUE, scrollX = '400px'))
+```
+
+# responsiveness
+
+```{r}
+sumTab_log_mgb <- read.delim("output/resp_sumTab_log.txt", sep = "\t", header = TRUE)
+sumTab_log_aou <- read.delim("output/resp_sumTab_log_aou.txt", sep = "\t", header = TRUE)
+
+sumTab_log <- merge(
+  sumTab_log_mgb, sumTab_log_aou, 
+  by = c("drug_group", "predictor"),
+  suffixes = c("_mgb", "_aou"),
+  all = FALSE
+)
+sumTab_log <- sumTab_log %>% 
+  arrange(drug_group, pval_mgb) %>% 
+  dplyr::select(-c("outcome_mgb", "outcome_aou"))
+
+DT::datatable(sumTab_log, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_log_one_sig <- sumTab_log %>% 
+  filter((pval_mgb<0.2 & pval_aou>=0.2) | (pval_mgb>=0.2 & pval_aou<0.2))
+DT::datatable(sumTab_log_one_sig, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_log_dupi <- sumTab_log %>% filter(drug_group == "Dupilumab") 
+DT::datatable(sumTab_log_dupi, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_log_il5 <- sumTab_log %>% filter(drug_group == "IL5") 
+DT::datatable(sumTab_log_il5, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_log_oma <- sumTab_log %>% filter(drug_group == "Omalizumab") 
+DT::datatable(sumTab_log_oma, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_log_wide <- sumTab_log %>%
+  dplyr::select(predictor,drug_group,pval_mgb,pval_aou,OR_mgb,OR_aou,AUC_mgb,AUC_aou) %>%
+  pivot_wider(names_from = drug_group, values_from = c(pval_mgb,pval_aou,OR_mgb,OR_aou,AUC_mgb,AUC_aou))
+DT::datatable(sumTab_log_wide, options = list(pageLength = 15, autoWidth = TRUE, scrollX = '400px'))
+```
+
+
+# rank norm lm
+```{r}
+sumTab_lm_mgb <- read.delim("/path/to/asthma_biologics/output/rank_norm_exac_sumTab_lm.txt", sep = "\t", header = TRUE)
+sumTab_lm_aou <- read.delim("/path/to/asthma_biologics/output/rank_norm_exac_sumTab_lm_aou.txt", sep = "\t", header = TRUE)
+
+sumTab_lm <- merge(
+  sumTab_lm_mgb, sumTab_lm_aou, 
+  by = c("drug_group", "predictor"),
+  suffixes = c("_mgb", "_aou"),
+  all = FALSE
+)
+sumTab_lm <- sumTab_lm %>% 
+  arrange(drug_group, pval_mgb) %>% 
+  dplyr::select(-c("outcome_mgb", "outcome_aou"))
+
+DT::datatable(sumTab_lm, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_lm_dupi <- sumTab_lm %>% filter(drug_group == "Dupilumab") 
+DT::datatable(sumTab_lm_dupi, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_lm_il5 <- sumTab_lm %>% filter(drug_group == "IL5") 
+DT::datatable(sumTab_lm_il5, options = list(autoWidth = TRUE, scrollX = '400px'))
+
+sumTab_lm_oma <- sumTab_lm %>% filter(drug_group == "Omalizumab") 
+DT::datatable(sumTab_lm_oma, options = list(autoWidth = TRUE, scrollX = '400px'))
+```
+
+```{r}
+sumTab_lm_wide <- sumTab_lm %>%
+  dplyr::select(predictor,drug_group,pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou) %>%
+  pivot_wider(names_from = drug_group, values_from = c(pval_mgb,pval_aou,beta_95CI_mgb,beta_95CI_aou,adj_p_mgb,adj_p_aou))
+DT::datatable(sumTab_lm_wide, options = list(pageLength = 15, autoWidth = TRUE, scrollX = '400px'))
+```
+
+
+# SubTab filtered
+## NB
+```{r}
+compare_betas <- function(beta1, beta2) {
+  beta1_sign <- substr(beta1, 1, 1)
+  beta2_sign <- substr(beta2, 1, 1)
+    if ((beta1_sign == "-" && beta2_sign == "-") || 
+      (beta1_sign != "-" && beta2_sign != "-")) {
+    return(1)
+  } else {
+    return(0)
+  }
+}
+```
+
+```{r}
+p_thres <- 0.2
+drug_group_order <- c("Omalizumab", "Dupilumab", "IL5")
+
+sumTab_nb_both_sig <- sumTab_nb %>% 
+  filter(pval_mgb<p_thres & pval_aou<p_thres) %>% 
+  mutate(concordance = mapply(compare_betas, beta_95CI_mgb, beta_95CI_aou)) 
+
+sumTab_nb_both_sig_same <- sumTab_nb_both_sig %>%
+  filter(concordance == 1) %>% 
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_nb_both_sig_same, options = list(autoWidth = TRUE, scrollX = '400px'))
+# write.table(sumTab_nb_both_sig_same, "output/exac_sumTab_nb_both_sig_same_direc.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+sumTab_nb_both_sig_diff <- sumTab_nb_both_sig %>%
+  filter(concordance == 0) %>% 
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_nb_both_sig_diff, options = list(autoWidth = TRUE, scrollX = '400px'))
+# write.table(sumTab_nb_both_sig_diff, "output/exac_sumTab_nb_both_sig_diff_direc.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+sumTab_nb_one_sig <- sumTab_nb %>% 
+  filter((pval_mgb<p_thres & pval_aou>=p_thres) | (pval_mgb>=p_thres & pval_aou<p_thres)) %>% 
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_nb_one_sig, options = list(autoWidth = TRUE, scrollX = '400px'))
+# write.table(sumTab_nb_one_sig, "output/exac_sumTab_nb_one_sig.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+## log
+```{r}
+compare_or <- function(or1, or2) {
+  if ((or1 >= 1 && or2 >= 1) || (or1 < 1 && or2 < 1)) {
+    return(1)
+  } else {
+    return(0)
+  }
+}
+```
+
+```{r}
+sumTab_log_both_sig <- sumTab_log %>% 
+  filter(pval_mgb<p_thres & pval_aou<p_thres) %>% 
+  mutate(concordance = mapply(compare_or, OR_mgb, OR_aou)) 
+
+sumTab_log_both_sig_same <- sumTab_log_both_sig %>%
+  filter(concordance == 1) %>% 
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_log_both_sig_same, options = list(autoWidth = TRUE, scrollX = '400px'))
+write.table(sumTab_log_both_sig_same, "output/resp_sumTab_log_both_sig_same_direc.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+sumTab_log_both_sig_diff <- sumTab_log_both_sig %>%
+  filter(concordance == 0) %>% 
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_log_both_sig_diff, options = list(autoWidth = TRUE, scrollX = '400px'))
+write.table(sumTab_log_both_sig_diff, "output/resp_sumTab_log_both_sig_diff_direc.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+sumTab_log_one_sig <- sumTab_log %>%
+  filter((pval_mgb<p_thres & pval_aou>=p_thres) | (pval_mgb>=p_thres & pval_aou<p_thres)) %>%
+  arrange(match(drug_group, drug_group_order))
+DT::datatable(sumTab_log_one_sig, options = list(autoWidth = TRUE, scrollX = '400px'))
+write.table(sumTab_log_one_sig, "output/resp_sumTab_log_one_sig.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+p_thres_either_sig <- 0.1
+
+total = nrow(sumTab_log)
+mgb_sig <- nrow(sumTab_log %>% filter(pval_mgb < p_thres_either_sig))
+aou_sig <- nrow(sumTab_log %>% filter(pval_aou < p_thres_either_sig))
+mgb_sig / total
+aou_sig / total
+
+```
+
+
+```{r}
+sumTab_log_either_sig <- sumTab_log %>%
+  filter(pval_mgb < p_thres_either_sig | pval_aou < p_thres_either_sig) %>%
+  arrange(match(drug_group, drug_group_order)) %>%
+  dplyr::select(-AUC_mgb, -AUC_aou)
+DT::datatable(sumTab_log_either_sig, options = list(autoWidth = TRUE, scrollX = '400px'))
+write.table(sumTab_log_either_sig, "output/resp_sumTab_log_either_sig_0.01_round2.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+```{r}
+final_table_round2 <- sumTab_log %>% filter(drug_group=="Omalizumab" & predictor=="IL21.7124.18.3" | 
+                                drug_group=="Omalizumab" & predictor=="IL5RA.4491.4.2" |
+                                drug_group=="IL5" & predictor=="IGHE.IGK.IGL.4135.84.2_snp" |
+                                drug_group=="IL5" & predictor=="IRF6.9999.1.3_snp" |
+                                drug_group=="Dupilumab" & predictor=="IL21.7124.18.3" |
+                                drug_group=="Dupilumab" & predictor=="CCL17.3519.3.2")
+
+final_table_round2
+```
+
+```{r}
+write.table(final_table_round2, "output/resp_sumTab_log_final_table_round2.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r}
+sumTab_log_both_sig_0.1 <- sumTab_log %>% 
+  filter(pval_mgb<0.1 & pval_aou<0.1) %>% 
+  mutate(concordance = mapply(compare_or, OR_mgb, OR_aou)) 
+write.table(sumTab_log_both_sig_0.1, "output/resp_sumTab_log_both_sig_0.01.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+# AUC plot
+```{r, fig.height=5, fig.width=5}
+IL21_roc_mgb <- readRDS("output/IL21_roc_list_mgb.rds")
+IL21_roc_aou <- readRDS("output/IL21_roc_list_aou.rds")
+
+plot(smooth(IL21_roc_mgb$roc_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21\nin Omalizumab and Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(IL21_roc_aou$roc_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+plot(smooth(IL21_roc_mgb$roc_IL21_dupi_resp), col = "#FF6600", add = TRUE)
+plot(smooth(IL21_roc_aou$roc_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+
+labels <- c(
+  paste("IL21 Omalizumab MGBB (AUC =", signif(auc(IL21_roc_mgb$roc_IL21_oma_resp), 3), ")"),
+  paste("IL21 Omalizumab AoU (AUC =", signif(auc(IL21_roc_aou$roc_IL21_oma_resp), 3), ")"),
+  paste("IL21 Dupilumab MGBB (AUC =", signif(auc(IL21_roc_mgb$roc_IL21_dupi_resp), 3), ")"),
+  paste("IL21 Dupilumab AoU (AUC =", signif(auc(IL21_roc_aou$roc_IL21_dupi_resp), 3), ")")
+)
+
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF", "#FF6600", "#FF6600"), 
+       lwd = 2, lty = c(1, 2, 1, 2),cex = 0.7, y.intersp = 0.8)
+
+
+pdf("output/roc_plot_IL21.pdf", width = 5, height = 5)
+plot(smooth(IL21_roc_mgb$roc_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21\nin Omalizumab and Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(IL21_roc_aou$roc_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+plot(smooth(IL21_roc_mgb$roc_IL21_dupi_resp), col = "#FF6600", add = TRUE)
+plot(smooth(IL21_roc_aou$roc_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF", "#FF6600", "#FF6600"), 
+       lwd = 2, lty = c(1, 2, 1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+
+jpeg("output/roc_plot_IL21.jpg", width = 5, height = 5, units = "in", res = 300)
+plot(smooth(IL21_roc_mgb$roc_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21\nin Omalizumab and Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(IL21_roc_aou$roc_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+plot(smooth(IL21_roc_mgb$roc_IL21_dupi_resp), col = "#FF6600", add = TRUE)
+plot(smooth(IL21_roc_aou$roc_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF", "#FF6600", "#FF6600"), 
+       lwd = 2, lty = c(1, 2, 1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+```
+
+```{r, fig.height=5, fig.width=5}
+IL5RA_IL21_roc_mgb <- readRDS("/path/to/asthma_biologics/output/IL5RA_IL21_roc_list_mgb.rds")
+IL5RA_IL21_roc_aou <- readRDS("/path/to/asthma_biologics/output/IL5RA_IL21_roc_list_aou.rds")
+
+plot(smooth(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21+IL5RA\nin Omalizumab", cex.main = 1, font.main = 1)
+plot(smooth(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+
+labels <- c(
+  paste("IL21+IL5RA Omalizumab MGBB (AUC =", signif(auc(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), 3), ")"),
+  paste("IL21+IL5RA Omalizumab AoU (AUC =", signif(auc(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), 3), ")")
+)
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF"), 
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+
+pdf("/path/to/asthma_biologics/output/roc_plot_IL21_IL5RA_oma.pdf", width = 5, height = 5)
+plot(smooth(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21 + IL5RA \nin Omalizumab", cex.main = 1, font.main = 1)
+plot(smooth(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF"),
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+
+jpeg("/path/to/asthma_biologics/output/roc_plot_IL21_IL5RA_oma.jpg", width = 5, height = 5, units = "in", res = 300)
+plot(smooth(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21 + IL5RA \nin Omalizumab", cex.main = 1, font.main = 1)
+plot(smooth(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#0033FF", "#0033FF"),
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+```
+
+
+```{r, fig.height=5, fig.width=5}
+CCL17_IL21_roc_mgb <- readRDS("/path/to/asthma_biologics/output/CCL17_IL21_roc_list_mgb.rds")
+CCL17_IL21_roc_aou <- readRDS("/path/to/asthma_biologics/output/CCL17_IL21_roc_list_aou.rds")
+
+plot(smooth(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), col = "#FF6600", main = "Response predicted by IL21+CCL17\nin Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+labels <- c(
+  paste("IL21+CCL17 Dupilumab MGBB (AUC =", signif(auc(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), 3), ")"),
+  paste("IL21+CCL17 Dupilumab AoU (AUC =", signif(auc(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), 3), ")")
+)
+legend("bottomright", legend = labels, col = c("#FF6600", "#FF6600"), 
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+
+pdf("/path/to/asthma_biologics/output/roc_plot_IL21_CCL17_dupi.pdf", width = 5, height = 5)
+plot(smooth(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), col = "#FF6600", main = "Response predicted by IL21+CCL17\nin Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#FF6600", "#FF6600"),
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+
+jpeg("/path/to/asthma_biologics/output/roc_plot_IL21_CCL17_dupi.jpg", width = 5, height = 5, units = "in", res = 300)
+plot(smooth(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), col = "#FF6600", main = "Response predicted by IL21+CCL17\nin Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+legend("bottomright", legend = labels, col = c("#FF6600", "#FF6600"),
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+invisible(dev.off())
+```
+
+```{r}
+cat("IL21 in MGBB Omalizumab AUROC:", auc(IL21_roc_mgb$roc_IL21_oma_resp), "\n")
+cat("IL21 + IL5RA in MGBB Omalizumab AUROC:",auc(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), "\n")
+cat("AUROC increase after ading IL5RA to IL21 in MGBB Omalizumab:", auc(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp) > auc(IL21_roc_mgb$roc_IL21_oma_resp), "\n")
+
+cat("IL21 in AoU Omalizumab AUROC:", auc(IL21_roc_aou$roc_IL21_oma_resp), "\n")
+cat("IL21 + IL5RA in AoU Omalizumab AUROC:",auc(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), "\n")
+cat("AUROC increase after ading IL5RA to IL21 in AoU Omalizumab:", auc(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp) > auc(IL21_roc_aou$roc_IL21_oma_resp), "\n")
+
+cat("IL21 in MGBB Dupilumab AUROC:", auc(IL21_roc_mgb$roc_IL21_dupi_resp), "\n")
+cat("IL21 + CCL17 in MGBB Dupilumab AUROC:",auc(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), "\n")
+cat("AUROC increase after ading CCL17 to IL21 in MGBB Dupilumab:", auc(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp) > auc(IL21_roc_mgb$roc_IL21_dupi_resp), "\n")
+
+cat("IL21 in AoU Dupilumab AUROC:", auc(IL21_roc_aou$roc_IL21_dupi_resp), "\n")
+cat("IL21 + CCL17 in AoU Dupilumab AUROC:",auc(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), "\n")
+cat("AUROC increase after ading CCL17 to IL21 in AoU Dupilumab:", auc(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp) > auc(IL21_roc_aou$roc_IL21_dupi_resp), "\n")
+
+```
+
+# three panel AUC
+```{r, fig.height=5, fig.width=15}
+IL21_roc_mgb <- readRDS("/path/to/asthma_biologics/output/IL21_roc_list_mgb.rds")
+IL21_roc_aou <- readRDS("/path/to/asthma_biologics/output/IL21_roc_list_aou.rds")
+IL5RA_IL21_roc_mgb <- readRDS("/path/to/asthma_biologics/output/IL5RA_IL21_roc_list_mgb.rds")
+IL5RA_IL21_roc_aou <- readRDS("/path/to/asthma_biologics/output/IL5RA_IL21_roc_list_aou.rds")
+CCL17_IL21_roc_mgb <- readRDS("/path/to/asthma_biologics/output/CCL17_IL21_roc_list_mgb.rds")
+CCL17_IL21_roc_aou <- readRDS("/path/to/asthma_biologics/output/CCL17_IL21_roc_list_aou.rds")
+
+# pdf("/path/to/asthma_biologics/output/three_panel_roc.pdf", width = 15, height = 5)
+par(mfrow = c(1, 3), cex = 1.1) 
+
+plot(smooth(IL21_roc_mgb$roc_IL21_oma_resp), col = "#0033FF",
+     main = "Response predicted by IL21\nin Omalizumab and Dupilumab",
+     cex.main = 1, font.main = 1)
+plot(smooth(IL21_roc_aou$roc_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+plot(smooth(IL21_roc_mgb$roc_IL21_dupi_resp), col = "#FF6600", add = TRUE)
+plot(smooth(IL21_roc_aou$roc_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+
+labels1 <- c(
+  paste("IL21 Omalizumab MGBB (AUC =", signif(auc(IL21_roc_mgb$roc_IL21_oma_resp), 3), ")"),
+  paste("IL21 Omalizumab AoU (AUC =", signif(auc(IL21_roc_aou$roc_IL21_oma_resp), 3), ")"),
+  paste("IL21 Dupilumab MGBB (AUC =", signif(auc(IL21_roc_mgb$roc_IL21_dupi_resp), 3), ")"),
+  paste("IL21 Dupilumab AoU (AUC =", signif(auc(IL21_roc_aou$roc_IL21_dupi_resp), 3), ")")
+)
+legend("bottomright", legend = labels1, col = c("#0033FF", "#0033FF", "#FF6600", "#FF6600"),
+       lwd = 2, lty = c(1, 2, 1, 2), cex = 0.7, y.intersp = 0.8)
+
+
+plot(smooth(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), col = "#0033FF", main = "Response predicted by IL21+IL5RA\nin Omalizumab", cex.main = 1, font.main = 1)
+plot(smooth(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), col = "#0033FF", lty = 2, add = TRUE)
+
+labels2 <- c(
+  paste("IL21 + IL5RA Omalizumab MGBB (AUC =", signif(auc(IL5RA_IL21_roc_mgb$roc_IL5RA_IL21_oma_resp), 3), ")"),
+  paste("IL21 + IL5RA Omalizumab AoU (AUC =", signif(auc(IL5RA_IL21_roc_aou$roc_IL5RA_IL21_oma_resp), 3), ")")
+)
+legend("bottomright", legend = labels2, col = c("#0033FF", "#0033FF"), 
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+
+
+plot(smooth(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), col = "#FF6600", main = "Response predicted by IL21+CCL17\nin Dupilumab", cex.main = 1, font.main = 1)
+plot(smooth(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), col = "#FF6600", lty = 2, add = TRUE)
+labels3 <- c(
+  paste("IL21 + CCL17 Dupilumab MGBB (AUC =", signif(auc(CCL17_IL21_roc_mgb$roc_CCL17_IL21_dupi_resp), 3), ")"),
+  paste("IL21 + CCL17 Dupilumab AoU (AUC =", signif(auc(CCL17_IL21_roc_aou$roc_CCL17_IL21_dupi_resp), 3), ")")
+)
+legend("bottomright", legend = labels3, col = c("#FF6600", "#FF6600"), 
+       lwd = 2, lty = c(1, 2),cex = 0.7, y.intersp = 0.8)
+```
+

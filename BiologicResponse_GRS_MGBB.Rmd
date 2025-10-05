@@ -1,0 +1,1214 @@
+---
+title: "GRS and biologic responsiveness in MGBB"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message=FALSE, warning=FALSE}
+library(data.table)
+library(tidyverse)
+library(tableone)
+library(knitr)
+library(pROC)
+library(glmnet)
+library(MASS)
+library(pscl)
+library(ResourceSelection)
+library(powerMediation)
+
+options(bitmapType='cairo')
+```
+
+# load data
+```{r}
+rm(list=ls())
+
+# load functions
+source("/path/to/asthma_biologics/helper_functions.R")
+
+mgb=fread("/path/to/asthma_biologics/data/20250115_PRS_final.csv",data.table=F)
+
+mgb_dosages=fread("/path/to/asthma_biologics/data/grs_pc_recoded_variants_w_IL4.csv",data.table=F)
+mgb_dose_names=fread("/path/to/Scores_variants_w_IL4_long.txt",data.table = F)
+
+control_grs <- fread("/path/to/asthma_biologics/data/control_grs.csv",data.table = F)
+control_grs <- control_grs[, !(names(control_grs) %in% c("biobank_id", "#IID"))]
+control_grs2 <- fread("/path/to/asthma_biologics/data/control_grs_2.csv",data.table = F)
+control_grs2 <- control_grs2[, !(names(control_grs2) %in% c("biobank_id", "#IID"))]
+
+# merge in the snp dosages
+mgb_dosages <- mgb_dosages[,c("EMPI",grep(":",names(mgb_dosages),value=T))]
+head(mgb_dosages)
+names(mgb_dosages) <- as.character(map(str_split(names(mgb_dosages),"_"),1))
+
+## change names
+head(mgb_dose_names)
+idx=na.omit(match(names(mgb_dosages),mgb_dose_names$variant_1))
+names(mgb_dosages) <- c("EMPI",mgb_dose_names[idx,"score"])
+names(mgb_dosages)[!names(mgb_dosages) %in% c("EMPI")] <- paste0(names(mgb_dosages)[!names(mgb_dosages) %in% c("EMPI")],"_snp")
+
+names(mgb_dosages) <- make.names(names(mgb_dosages),unique = T)
+
+## merge
+mgb <- merge(mgb,mgb_dosages,by="EMPI",all.x=T)
+mgb <- merge(mgb,control_grs,by="EMPI",all.x=T)
+mgb <- merge(mgb,control_grs2,by="EMPI",all.x=T)
+
+## Limit to white people
+# table(mgb$Race)
+table(mgb$WhiteNonWhite)
+
+# mgb <- mgb %>% filter(Race=="White")
+mgb <- mgb %>% filter(WhiteNonWhite==1)
+```
+
+# Visualize data
+```{r}
+
+plotvars=grep(paste0(c("EMPI","V1","biobank_id","initial_biologic","date_switch_1","Med_switched_to_1"),collapse = "|"),names(mgb),value=T,invert=T)
+
+sapply(plotvars,function(x){
+
+  if(is.numeric(mgb[,x])) {
+
+    hist(mgb[,x],main=x,xlab=" ")
+  }
+})
+
+```
+
+# Prepare risk scores and snps
+```{r}
+# an unused id column is getting though the grep
+mgb <- mgb[, !(names(mgb) == "...1")]
+
+scores_all=grep("\\.",names(mgb),value=T)
+
+control_scores=grep("\\.",names(control_grs),value=T)
+control_scores2=grep("\\.",names(control_grs2),value=T)
+
+scores_rm_control=scores_all[!scores_all %in% c(control_scores, control_scores2)]
+
+scores_grs=grep("_snp",scores_rm_control,value=T,invert=T)
+cat('Total preselected GRS:', length(scores_grs), "\n")
+
+excluded_predictors<- c("IL1B.3037.62.1", "IL4R.3055.54.2", "IFNA14.7180.114.3", "IL13RA1.2633.52.2", "CCL1.2770.51.2", "IGHE.IGK.IGL.4135.84.2", "IFNAR1.9183.7.3", "IFNGR2.9180.6.3", "IGF1.2952.75.2", "IL10.2773.50.2", "IRF4.9857.38.3", "IL22.2778.10.2","IFNG.14147.50.3", "IRF6.9999.1.3", "IFNGR1.5825.49.3", "IFNA10.14128.121.3", "IL17A.9170.24.3", "LTBR.2636.10.2", "LTA.LTB.3506.49.1", "IL6.4673.13.2")
+
+# selected scores (excluding controls, including snps)
+scores=scores_rm_control[!scores_rm_control %in% excluded_predictors]
+
+cat("Total GRS and SNP for analysis:", length(scores), "\n")
+
+# rank normalize the non-snp scores and control scores
+# selected scores excluding snps
+rnList=grep("_snp",scores,value=T,invert=T)
+
+# selected and control scores, excluding snps
+non_snp_scores <- c(rnList, control_scores, control_scores2)
+
+cat('Controls 1:', length(control_scores), "\n")
+cat('Controls 2:', length(control_scores2), "\n")
+
+rNorm <- function(x){
+  qnorm((rank(x,na.last="keep")-0.5)/sum(!is.na(x)))
+}
+
+mgb[,non_snp_scores] <- lapply(mgb[,non_snp_scores],function(x){
+  rNorm(x)
+})
+
+# Regress out the PCs
+pcs=paste0("PC",1:10)
+for(pr in non_snp_scores){
+
+  mgb[,pr] <- as.numeric(resid(lm(as.formula(paste0(pr,"~",paste0(pcs,collapse = "+"))),data=mgb)))
+  
+}
+
+snpList=grep("_snp",names(mgb),value=T)
+
+```
+
+# define variables
+```{r}
+mgb <- mgb %>%
+  mutate(response = case_when(
+    pre_index_annualized_exacerbation_rate == 0 & post_index_exacerbation_count_censor_at_switch > 0 ~ 0,
+    pre_index_annualized_exacerbation_rate == 0 & post_index_exacerbation_count_censor_at_switch == 0 ~ 1,
+    TRUE ~ ifelse((post_index_annualized_exacerbation_rate_censor_at_switch / pre_index_annualized_exacerbation_rate) <= 0.5, 1, 0)
+  ))
+table(mgb$response)
+```
+
+
+# Table 1
+```{r}
+# make new variable for biologic
+mgb <- mgb %>% mutate(initial_biologic_recoded=
+  case_when(
+    initial_biologic =="Dupilumab" ~"Dupilumab",
+    initial_biologic == "Omalizumab" ~ "Omalizumab",
+    initial_biologic %in% c("Benralizumab","Mepolizumab") ~ "IL5",
+    TRUE ~ NA_character_
+  )
+)
+
+# one has NA as group
+table(mgb$initial_biologic_recoded, useNA="ifany")
+mgb <- mgb %>% filter(!is.na(initial_biologic_recoded))
+
+cat("Total patients:", nrow(mgb))
+
+demovars=c("age","Female","WhiteNonWhite","bmi","smoking","pre_index_exacerbation_count","post_index_exacerbation_count_censor_at_switch")
+varsToFactor=c("Female","WhiteNonWhite","smoking")
+
+T1=CreateTableOne(vars=demovars,factorVars = varsToFactor,strata="initial_biologic_recoded",data=mgb)
+
+T1_out <- print(T1,quote = FALSE, noSpaces = TRUE, printToggle = FALSE, varLabel = TRUE)
+
+kable(T1_out)
+
+write.table(T1_out, "output/table_one_mgbb.txt", sep = "\t", quote = FALSE)
+```
+
+# Table 1 remove zeros in exacerbation
+```{r}
+mgb_rm0 <- mgb %>% filter(post_index_exacerbation_count_censor_at_switch > 0)
+
+T1_rm0=CreateTableOne(vars=demovars,factorVars = varsToFactor,strata="initial_biologic_recoded",data=mgb_rm0)
+
+T1_rm0
+
+T1_out_rm0 <- print(T1_rm0,quote = FALSE, noSpaces = TRUE, printToggle = FALSE, varLabel = TRUE,nonnormal=c("pre_index_exacerbation_count","post_index_exacerbation_count_censor_at_switch"))
+kable(T1_out_rm0)
+
+# write.table(T1_out_rm0, "output/table_one_rm0_mgbb.txt", sep = "\t", quote = FALSE)
+```
+
+# Define variables
+```{r define parameters}
+outcome <- "post_index_exacerbation_count_censor_at_switch"
+
+adjustment_vars <- c("age", "Female","bmi", "pre_index_annualized_exacerbation_rate")
+pcs # defined above
+
+strata=names(table(mgb$initial_biologic_recoded))
+```
+
+# Regression
+```{r}
+summary(mgb$max_eosinophil_3yr)
+```
+
+## Baseline exacerbation 
+```{r}
+sumTab_nb_baseline_rm0 <- data.frame(matrix(nrow=0,ncol=7))
+
+for (predictor in scores) {
+
+  if(predictor %in% rnList){
+    adjustment_vars2=c("age", "Female","bmi", "max_eosinophil_3yr")
+  } else{
+    adjustment_vars2=c("age", "Female","bmi",pcs,"max_eosinophil_3yr") 
+  }
+  
+  model_table <- call_model(mgb_rm0, drug_group="all", outcome="pre_index_exacerbation_count", predictor, model_type="nb",
+                            adjustment_vars2, log_offset=NULL)
+  
+  sumTab_nb_baseline_rm0 <- rbind(sumTab_nb_baseline_rm0, model_table)
+  
+}
+
+
+sumTab_nb_baseline_rm0 <- sumTab_nb_baseline_rm0 %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(pval)
+
+print(nrow(sumTab_nb_baseline_rm0 %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_nb_baseline_rm0 %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_nb_baseline_rm0)
+```
+
+```{r}
+sumTab_nb_baseline <- data.frame(matrix(nrow=0,ncol=7))
+
+for (predictor in scores) {
+
+  if(predictor %in% rnList){
+    adjustment_vars2=c("age", "Female","bmi", "max_eosinophil_3yr")
+  } else{
+    adjustment_vars2=c("age", "Female","bmi",pcs,"max_eosinophil_3yr") 
+  }
+  
+  model_table <- call_model(mgb, drug_group="all", outcome="pre_index_exacerbation_count", predictor, model_type="nb",
+                            adjustment_vars2, log_offset=NULL)
+  
+  sumTab_nb_baseline <- rbind(sumTab_nb_baseline, model_table)
+  
+}
+
+
+sumTab_nb_baseline <- sumTab_nb_baseline %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(pval)
+
+# write.table(sumTab_nb, "output/exac_sumTab_nb_baseline.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+print(nrow(sumTab_nb_baseline %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_nb_baseline %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_nb_baseline)
+```
+
+## exacerbations poisson
+```{r, message=FALSE, warning=FALSE}
+sumTab_poisson <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in scores) {
+  
+    # cat("Running model for predictor:", predictor, "\n")  # Debugging line to track loop progress
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "poisson", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_poisson <- rbind(sumTab_poisson, model_table)
+    
+  }
+}
+
+sumTab_poisson <- sumTab_poisson %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+print(nrow(sumTab_poisson %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_poisson %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_poisson)
+```
+
+## exacerbations NB
+```{r, message=FALSE, warning=FALSE}
+sumTab_nb <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in scores) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_nb <- rbind(sumTab_nb, model_table)
+    
+  }
+}
+
+sumTab_nb <- sumTab_nb %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+# write.table(sumTab_nb, "output/exac_sumTab_nb.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+print(nrow(sumTab_nb %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_nb %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_nb)
+```
+
+## exacerbations NB remove zeros
+```{r, message=FALSE, warning=FALSE}
+sumTab_nb_rm0 <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in scores) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+
+    model_table <- tryCatch({call_model(mgb_rm0 %>% filter(initial_biologic_recoded==st),
+                            drug_group = st, outcome, predictor, model_type = "nb", 
+                            adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")}, 
+                        error = function(e) {
+    cat("Error with predictor:", predictor, "in strata:", st, "-", e$message, "\n")
+    return(NULL)
+    })
+        
+        
+    sumTab_nb_rm0 <- rbind(sumTab_nb_rm0, model_table)
+    
+  }
+}
+
+sumTab_nb_rm0 <- sumTab_nb_rm0 %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+# write.table(sumTab_nb_rm0, "output/exac_sumTab_nb_rm0.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+print(nrow(sumTab_nb_rm0 %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_nb_rm0 %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_nb_rm0)
+```
+
+## exacerbations ZINB
+```{r, message=FALSE, warning=FALSE}
+sumTab_zinb <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in scores) {
+    
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- tryCatch({call_model_zinb(mgb %>% filter(initial_biologic_recoded==st),
+                                             drug_group = st, outcome, predictor, 
+                                             model_type = "zinb", adjustment_vars2,
+                                             log_offset="post_index_follow_up_length_1yr_censor_at_switch")}, 
+                            error = function(e) {
+      cat("Error with predictor:", predictor, "in strata:", st, "-", e$message, "\n")
+      return(NULL)
+    })
+    
+    sumTab_zinb <- rbind(sumTab_zinb, model_table)
+    
+  }
+}
+
+sumTab_zinb <- sumTab_zinb %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  # filter(adj_p < 0.05) %>% 
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+print(nrow(sumTab_zinb %>% filter(adj_p < 0.1)))
+print(nrow(sumTab_zinb %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_zinb)
+```
+
+## exacerbations poisson with control GRSs 
+```{r, message=FALSE, warning=FALSE}
+sumTab_poisson_controls <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores) {
+    # the PCs are regressed out
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "poisson", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_poisson_controls <- rbind(sumTab_poisson_controls, model_table)
+    
+  }
+}
+
+sumTab_poisson_controls <- sumTab_poisson_controls %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_poisson_controls)
+```
+
+## exacerbations NB with control GRSs 
+```{r, message=FALSE, warning=FALSE}
+sumTab_nb_controls <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores) {
+
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_nb_controls <- rbind(sumTab_nb_controls, model_table)
+    
+  }
+}
+
+sumTab_nb_controls <- sumTab_nb_controls %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_nb_controls)
+```
+
+## exacerbations NB remove zeros with control GRSs 
+```{r, message=FALSE, warning=FALSE}
+sumTab_nb_rm0_controls <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores) {
+
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb_rm0 %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_nb_rm0_controls <- rbind(sumTab_nb_rm0_controls, model_table)
+    
+  }
+}
+
+sumTab_nb_rm0_controls <- sumTab_nb_rm0_controls %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_nb_rm0_controls)
+```
+
+## exacerbations poisson with additional control GRSs
+```{r, message=FALSE, warning=FALSE}
+sumTab_poisson_controls2 <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores2) {
+
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_poisson_controls2 <- rbind(sumTab_poisson_controls2, model_table)
+    
+  }
+}
+
+sumTab_poisson_controls2 <- sumTab_poisson_controls2 %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_poisson_controls2)
+```
+
+## exacerbations NB with additional control GRSs
+```{r exacerbations nb control 2, message=FALSE, warning=FALSE}
+sumTab_nb_controls2 <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores2) {
+
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_nb_controls2 <- rbind(sumTab_nb_controls2, model_table)
+    
+  }
+}
+
+sumTab_nb_controls2 <- sumTab_nb_controls2 %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_nb_controls2)
+```
+
+## exacerbations NB remove zeros with additional control GRSs
+```{r, message=FALSE, warning=FALSE}
+sumTab_nb_rm0_controls2 <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores2) {
+
+    adjustment_vars2=adjustment_vars
+    
+    model_table <- call_model(mgb_rm0 %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome, predictor, model_type = "nb", 
+                                adjustment_vars2, log_offset="post_index_follow_up_length_1yr_censor_at_switch")
+    
+    sumTab_nb_rm0_controls2 <- rbind(sumTab_nb_rm0_controls2, model_table)
+    
+  }
+}
+
+sumTab_nb_rm0_controls2 <- sumTab_nb_rm0_controls2 %>% 
+  mutate(adj_p=signif(p.adjust(pval,method = "BH"),2)) %>%
+  mutate(pval = signif(pval, 2)) %>%
+  filter(pval < 0.1) %>%
+  dplyr::select(drug_group,outcome,predictor,beta_95CI,pval,adj_p) %>%
+  arrange(drug_group,adj_p)
+
+DT::datatable(sumTab_nb_rm0_controls2)
+```
+
+## responsiveness
+```{r}
+
+OrCi<-function(glmmod,varextract){
+  
+  res<-as.data.frame(summary(glmmod)$coefficients)
+  res<-res %>% 
+    mutate(OR=paste0(
+      round(exp(Estimate),2)," (",
+      round(exp(Estimate-1.96*`Std. Error`),2)," to ",
+      round(exp(Estimate+1.96*`Std. Error`),2), ")"
+    )) %>% 
+    filter(rownames(res) %in% varextract)
+  res$OR
+}
+
+pvalglm<-function(glmmod,varextract){
+  
+  res<-as.data.frame(summary(glmmod)$coefficients)
+  res<-res %>% 
+    # mutate(p=signif(`Pr(>|z|)`,2)) %>% 
+    mutate(p = `Pr(>|z|)`) %>% 
+    filter(rownames(res) %in% varextract)
+  res$p
+}
+
+```
+
+```{r, message=FALSE, warning=FALSE}
+sumTab_log <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+  for (predictor in scores) {
+  # for (predictor in pred_short) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- call_model_binary(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome="response", predictor, model_type="binomial", 
+                                adjustment_vars2, log_offset=NULL)
+    if (is.null(model_table)) {
+      next
+      }
+    sumTab_log <- rbind(sumTab_log, model_table)
+    
+  }
+}
+
+sumTab_log <- sumTab_log %>% 
+  # mutate(adj_p = signif(p.adjust(pval, method = "BH"), 2)) %>%
+  # filter(adj_p < 0.1) %>% #nothing is significant with adj_p
+  mutate(pval = signif(pval, 2)) %>%
+  dplyr::select(drug_group,outcome,predictor,OR,pval,AUC) %>%
+  arrange(drug_group,desc(AUC))
+
+write.table(sumTab_log, "output/resp_sumTab_log_round2.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+print(nrow(sumTab_log %>% filter(pval < 0.2)))
+print(nrow(sumTab_log %>% filter(pval < 0.2)) / nrow(sumTab_log))
+
+DT::datatable(sumTab_log)
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+set.seed(1)
+mgb_shuffle_resp <- mgb
+
+sumTab_log_shuffle <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+  for (predictor in scores) {
+  # for (predictor in pred_short) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    mgb_shuffle_resp[[predictor]] <- sample(mgb_shuffle_resp[[predictor]])
+    model_table <- call_model_binary(mgb_shuffle_resp %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome="response", predictor, model_type="binomial", 
+                                adjustment_vars2, log_offset=NULL)
+    if (is.null(model_table)) {
+      next
+      }
+    sumTab_log_shuffle <- rbind(sumTab_log_shuffle, model_table)
+    
+  }
+}
+
+sumTab_log_shuffle <- sumTab_log_shuffle %>% 
+  # mutate(adj_p = signif(p.adjust(pval, method = "BH"), 2)) %>%
+  # filter(adj_p < 0.1) %>% #nothing is significant with adj_p
+  mutate(pval = signif(pval, 2)) %>%
+  dplyr::select(drug_group,outcome,predictor,OR,pval,AUC) %>%
+  arrange(drug_group,desc(AUC))
+
+# write.table(sumTab_log_shuffle, "output/resp_sumTab_log_shuffle.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+
+print(nrow(sumTab_log_shuffle %>% filter(pval < 0.1)))
+
+DT::datatable(sumTab_log_shuffle)
+```
+
+## ROC plot 
+```{r}
+
+mgb_oma <- mgb %>% filter(initial_biologic_recoded=="Omalizumab")
+model_IL21_oma_resp <- build_model(mgb_oma, outcome="response", predictor="IL21.7124.18.3", model_type="binomial", adjustment_vars, log_offset=NULL)
+roc_IL21_oma_resp <- roc(model_IL21_oma_resp$y, model_IL21_oma_resp$fitted.values)
+
+mgb_dupi <- mgb %>% filter(initial_biologic_recoded=="Dupilumab")
+model_IL21_dupi_resp <- build_model(mgb_dupi, outcome="response", predictor="IL21.7124.18.3", model_type="binomial", adjustment_vars, log_offset=NULL)
+roc_IL21_dupi_resp <- roc(model_IL21_dupi_resp$y, model_IL21_dupi_resp$fitted.values)
+
+mgb_IL5 <- mgb %>% filter(initial_biologic_recoded=="IL5")
+model_IL21_IL5_resp <- build_model(mgb_IL5, outcome="response", predictor="IL21.7124.18.3", model_type="binomial", adjustment_vars, log_offset=NULL)
+roc_IL21_IL5_resp <- roc(model_IL21_IL5_resp$y, model_IL21_IL5_resp$fitted.values)
+
+plot(smooth(roc_IL21_oma_resp), col = "#006600", main = "Response predicted by IL21.7124.18.3", cex.main = 1.2, font.main = 1)
+plot(smooth(roc_IL21_dupi_resp), col = "#FF6600", add = TRUE)
+plot(smooth(roc_IL21_IL5_resp), col = "#0033FF", add = TRUE)
+
+labels <- c(
+  paste("IL21 Omalizumab response (AUC =", signif(auc(roc_IL21_oma_resp), 3), ")"),
+  paste("IL21 Dupilumab response (AUC =", signif(auc(roc_IL21_dupi_resp), 3), ")"),
+  paste("IL21 Mepolizumab response (AUC =", signif(auc(roc_IL21_IL5_resp), 3), ")")
+)
+
+legend("bottomright", legend = labels, col = c("#006600", "#FF6600", "#0033FF"), lwd = 2, cex = 0.8, y.intersp = 0.8)
+
+saveRDS(list(roc_IL21_oma_resp = roc_IL21_oma_resp, roc_IL21_dupi_resp = roc_IL21_dupi_resp, roc_IL21_IL5_resp= roc_IL21_IL5_resp), "output/IL21_roc_list_mgb.rds")
+```
+
+```{r}
+model_IL5RA_IL21_oma_resp <- build_model(mgb_oma, outcome="response", predictor="IL5RA.13686.2.3 + IL21.7124.18.3", model_type="binomial", adjustment_vars, log_offset=NULL)
+roc_IL5RA_IL21_oma_resp <- roc(model_IL5RA_IL21_oma_resp$y, model_IL5RA_IL21_oma_resp$fitted.values)
+
+plot(smooth(roc_IL5RA_IL21_oma_resp), col = "#FF66FF", main = "Response in Omalizumab", cex.main = 1.2, font.main = 1)
+
+labels <- c(
+  paste("IL21 + IL5RA Omalizumab response (AUC =", signif(auc(roc_IL5RA_IL21_oma_resp), 3), ")")
+)
+
+legend("bottomright", legend = labels, col = c("#FF66FF"), lwd = 2, cex = 0.8, y.intersp = 0.8)
+
+saveRDS(list(roc_IL5RA_IL21_oma_resp = roc_IL5RA_IL21_oma_resp), "output/IL5RA_IL21_roc_list_mgb.rds")
+```
+
+```{r}
+model_CCL17_IL21_dupi_resp <- build_model(mgb_dupi, outcome="response", predictor="CCL17.3519.3.2 + IL21.7124.18.3", model_type="binomial", adjustment_vars, log_offset=NULL)
+roc_CCL17_IL21_dupi_resp <- roc(model_CCL17_IL21_dupi_resp$y, model_CCL17_IL21_dupi_resp$fitted.values)
+
+plot(smooth(roc_CCL17_IL21_dupi_resp), col = "#006600", main = "Response in Dupilumab", cex.main = 1.2, font.main = 1)
+
+labels <- c(
+  paste("IL21 + CCL17 Dupilumab response (AUC =", signif(auc(roc_CCL17_IL21_dupi_resp), 3), ")")
+)
+
+legend("bottomright", legend = labels, col = c("#006600"), lwd = 2, cex = 0.8, y.intersp = 0.8)
+
+saveRDS(list(roc_CCL17_IL21_dupi_resp = roc_CCL17_IL21_dupi_resp), "output/CCL17_IL21_roc_list_mgb.rds")
+```
+
+## for reviewers
+```{r}
+# burden of exacerbation full cohort
+mean(mgb$pre_index_exacerbation_count)
+
+# counts for responders
+table(mgb$initial_biologic_recoded, mgb$response)
+```
+
+```{r}
+# power calculations
+# event rate estimate
+p1=0.5
+
+# IL21 dupi
+powerLogisticCon(n=42, p1=p1, OR=2.4, alpha=0.04)
+
+# IL21 oma
+powerLogisticCon(n=92, p1=p1, OR=1.7, alpha=0.04)
+
+# sample size in mepo
+SSizeLogisticCon(p1=p1, OR=1.7, alpha=0.2, power=0.69)
+```
+
+```{r}
+# aou
+# IL21 dupi
+powerLogisticCon(n=74, p1=p1, OR=0.57, alpha=0.08)
+
+# IL21 oma
+powerLogisticCon(n=111, p1=p1, OR=1.5, alpha=0.11)
+
+# sample size in mepo
+SSizeLogisticCon(p1=p1, OR=1.5, alpha=0.2, power=0.70)
+```
+
+### propensity score matching
+```{r}
+library(MatchIt)
+
+m.out <- matchit(response ~ age + Female + bmi + smoking, 
+                 data = na.omit(mgb_oma[,c("response","age","Female","bmi","smoking")]), 
+                 method = "nearest")
+
+mgb_oma_matched <- match.data(m.out)
+
+cat("after propensity matching:", nrow(mgb_oma_matched))
+table(mgb_oma_matched$response)
+```
+
+```{r}
+mgb_dup_oma <- subset(mgb, initial_biologic_recoded %in% c("Dupilumab", "Omalizumab"))
+mgb_dup_oma$initial_biologic_recoded_num <- ifelse(mgb_dup_oma$initial_biologic_recoded=="Dupilumab", 0, 1)
+m.out2 <- matchit(initial_biologic_recoded_num ~ age + Female + bmi + smoking,
+                data = na.omit(mgb_dup_oma[,c("initial_biologic_recoded_num","age","Female","bmi","smoking")]), 
+                method = "nearest")
+
+mgb_matched <- match.data(m.out2)
+
+cat("after propensity matching:", nrow(mgb_matched))
+table(mgb_matched$initial_biologic_recoded)
+```
+
+### confusion matrix
+```{r}
+cat("confusion matrix IL21 in Omalizumab: \n")
+pred_class <- ifelse(model_IL21_oma_resp$fitted.values > 0.5, 1, 0)
+true_class <- model_IL21_oma_resp$y
+table(Predicted = pred_class, Actual = true_class)
+
+cat("confusion matrix IL21 in Dupilumab: \n")
+pred_class <- ifelse(model_IL21_dupi_resp$fitted.values > 0.5, 1, 0)
+true_class <- model_IL21_dupi_resp$y
+table(Predicted = pred_class, Actual = true_class)
+
+cat("confusion matrix IL21 in IL5: \n")
+pred_class <- ifelse(model_IL21_IL5_resp$fitted.values > 0.5, 1, 0)
+true_class <- model_IL21_IL5_resp$y
+table(Predicted = pred_class, Actual = true_class)
+
+cat("confusion matrix IL21+IL5RA in Omalizumab: \n")
+pred_class <- ifelse(model_IL5RA_IL21_oma_resp$fitted.values > 0.5, 1, 0)
+true_class <- model_IL5RA_IL21_oma_resp$y
+table(Predicted = pred_class, Actual = true_class)
+
+cat("confusion matrix IL21+CCL17 in Dupilumab: \n")
+pred_class <- ifelse(model_CCL17_IL21_dupi_resp$fitted.values > 0.5, 1, 0)
+true_class <- model_CCL17_IL21_dupi_resp$y
+table(Predicted = pred_class, Actual = true_class)
+```
+
+```{r}
+get_confusion_counts <- function(model, threshold = 0.5) {
+  pred_class <- ifelse(model$fitted.values > threshold, 1, 0)
+  true_class <- model$y
+  tab <- table(Predicted = pred_class, Actual = true_class)
+
+  tp <- tab["1","1"]
+  fp <- tab["1","0"]
+  tn <- tab["0","0"]
+  fn <- tab["0","1"]
+
+  return(c("true positive" = tp, "false positive" = fp, "true negative" = tn, "false negative" = fn))
+}
+
+results <- rbind(
+  "IL21 in Omalizumab" = get_confusion_counts(model_IL21_oma_resp),
+  "IL21 in Dupilumab" = get_confusion_counts(model_IL21_dupi_resp),
+  "IL21 in IL5" = get_confusion_counts(model_IL21_IL5_resp),
+  "IL21+IL5RA in Omalizumab" = get_confusion_counts(model_IL5RA_IL21_oma_resp),
+  "IL21+CCL17 in Dupilumab" = get_confusion_counts(model_CCL17_IL21_dupi_resp)
+)
+write.table(results, "output/confusion_matrix_mgb.txt", sep = "\t", row.names = TRUE, quote = FALSE)
+results
+```
+
+### Hosmer–Lemeshow test
+```{r}
+cat("Hosmer–Lemeshow test IL21 in Omalizumab: \n")
+hoslem.test(model_IL21_oma_resp$y, model_IL21_oma_resp$fitted.values)
+
+cat("Hosmer–Lemeshow test IL21 in Dupilumab: \n")
+hoslem.test(model_IL21_dupi_resp$y, model_IL21_dupi_resp$fitted.values)
+
+cat("Hosmer–Lemeshow test IL21 in IL5: \n")
+hoslem.test(model_IL21_IL5_resp$y, model_IL21_IL5_resp$fitted.values)
+
+cat("Hosmer–Lemeshow test IL21+IL5RA in Omalizumab: \n")
+hoslem.test(model_IL5RA_IL21_oma_resp$y, model_IL5RA_IL21_oma_resp$fitted.values)
+
+cat("Hosmer–Lemeshow test IL21+CCL17 in Dupilumab: \n")
+hoslem.test(model_CCL17_IL21_dupi_resp$y, model_CCL17_IL21_dupi_resp$fitted.values)
+```
+
+### AUC with CI
+```{r} 
+cat("AUC and CI for IL21 in Omalizumab: \n")
+auc(roc_IL21_oma_resp)
+ci.auc(roc_IL21_oma_resp, method = "delong")
+
+cat("AUC and CI for IL21 in Dupilumab: \n")
+auc(roc_IL21_dupi_resp)
+ci.auc(roc_IL21_dupi_resp, method = "delong")
+
+cat("AUC and CI for IL21 in IL5: \n")
+auc(roc_IL21_IL5_resp)
+ci.auc(roc_IL21_IL5_resp, method = "delong")
+
+cat("AUC and CI for IL21+IL5RA in Omalizumab: \n")
+auc(roc_IL5RA_IL21_oma_resp)
+ci.auc(roc_IL5RA_IL21_oma_resp, method = "delong")
+
+cat("AUC and CI for IL21+CCL17 in Dupilumab: \n")
+auc(roc_CCL17_IL21_dupi_resp)
+ci.auc(roc_CCL17_IL21_dupi_resp, method = "delong")
+```
+
+### DeLong test 
+```{r}
+print(roc.test(roc_IL21_oma_resp, roc_IL5RA_IL21_oma_resp))
+print(roc.test(roc_IL21_dupi_resp, roc_CCL17_IL21_dupi_resp))
+```
+
+## responsiveness with control GRSs
+```{r responsiveness control, message=FALSE, warning=FALSE}
+# pred_short_controls <- unique(sumTab_nb_controls$predictor[sumTab_nb_controls$adj_p < 0.1])
+
+sumTab_log_controls <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- call_model_binary(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome="response", predictor, model_type="binomial", 
+                                adjustment_vars2, log_offset=NULL)
+    if (is.null(model_table)) {
+      next
+      }
+    sumTab_log_controls <- rbind(sumTab_log_controls, model_table)
+    
+  }
+}
+
+sumTab_log_controls_sig <- sumTab_log_controls %>% 
+  filter(pval < 0.2) %>% 
+  mutate(pval = signif(pval, 2)) %>%
+  arrange(drug_group,desc(AUC)) 
+
+print(nrow(sumTab_log_controls_sig)/nrow(sumTab_log_controls))
+DT::datatable(sumTab_log_controls_sig)
+```
+
+## responsiveness with additional control GRSs
+```{r responsiveness control 2, message=FALSE, warning=FALSE}
+sumTab_log_controls2 <- data.frame(matrix(nrow=0,ncol=7))
+
+for(st in strata){
+
+  for (predictor in control_scores2) {
+  
+    if(predictor %in% rnList){
+      adjustment_vars2=adjustment_vars
+    } else{
+      adjustment_vars2=paste0(c(adjustment_vars,pcs),collapse = "+")
+    }
+    
+    model_table <- call_model_binary(mgb %>% filter(initial_biologic_recoded==st),
+                                drug_group = st, outcome="response", predictor, model_type="binomial", 
+                                adjustment_vars2, log_offset=NULL)
+    if (is.null(model_table)) {
+      next
+      }
+    sumTab_log_controls2 <- rbind(sumTab_log_controls2, model_table)
+    
+  }
+}
+
+sumTab_log_controls2_sig <- sumTab_log_controls2 %>% 
+  filter(pval < 0.2) %>% 
+  mutate(pval = signif(pval, 2)) %>%
+  arrange(drug_group,desc(AUC)) 
+
+
+type_1_error_rate = nrow(sumTab_log_controls2_sig)/nrow(sumTab_log_controls2)
+cat("type 1 error rate:", type_1_error_rate)
+
+DT::datatable(sumTab_log_controls2_sig)
+```
+
+# Visualize associations
+```{r}
+
+sumTab_nb_filt <- sumTab_nb %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_nb_filt)){
+  
+  grp=sumTab_nb_filt[[i,"drug_group"]]
+  ot=sumTab_nb_filt[[i,"outcome"]]
+  pr=sumTab_nb_filt[[i,"predictor"]]
+  
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_cor=cor.test(mgb_subset[,pr],mgb_subset[,ot])
+  
+  if(pr %in% rnList){
+    
+    print(
+    ggplot(mgb_subset,
+           aes(x=get(pr),y=get(ot)))+
+      geom_point()+
+      geom_smooth(method="lm")+
+      xlab(pr)+ylab(ot)+
+      theme_classic()+
+      labs(subtitle = paste0("r=",signif(res_cor$estimate,2),", p=",signif(res_cor$p.value,2)))+
+      ggtitle(grp)
+    )
+    
+  } else {
+    
+     print(
+    ggplot(mgb_subset,
+           aes(x=as.factor(get(pr)),y=get(ot)))+
+      geom_violin()+
+      geom_point()+
+      xlab(pr)+ylab(ot)+
+      theme_classic()+
+      labs(subtitle = paste0("r=",signif(res_cor$estimate,2),", p=",signif(res_cor$p.value,2)))+
+      ggtitle(grp)
+    )
+  }
+}
+
+# for responsiveness
+sumTab_log_filt <- sumTab_log %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_log_filt)){
+  
+  grp=sumTab_log_filt[[i,"drug_group"]]
+  ot=sumTab_log_filt[[i,"outcome"]]
+  pr=sumTab_log_filt[[i,"predictor"]]
+  
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_ttest=t.test(mgb_subset[,pr]~mgb_subset[,ot])
+  
+  if(pr %in% rnList){
+    
+    print(
+    ggplot(mgb_subset,
+           aes(x=as.factor(get(ot)),y=get(pr)))+
+      geom_boxplot()+
+      geom_violin()+
+      xlab(ot)+ylab(pr)+
+      theme_classic()+
+      labs(subtitle = paste0("p=",signif(res_ttest$p.value,2)))+
+      ggtitle(grp)
+    )
+  } else {
+    summary_data <- mgb %>%
+      group_by(get(pr)) %>%
+      summarise(
+      Mean_Outcome = mean(get(ot)),
+      Count = n()
+    )
+
+  # Bar plot of mean outcome for each SNP category
+  print(
+    ggplot(summary_data, aes(x = as.factor(`get(pr)`), y = Mean_Outcome)) +
+     geom_bar(stat = "identity", fill = "skyblue", alpha = 0.8) +
+      geom_text(aes(label = round(Mean_Outcome, 2)), vjust = -0.5) +
+      labs(
+        title = grp,
+        x = pr,
+        y = "Response"
+      ) +
+    theme_classic()
+  )
+  }
+}
+```
+
+# Visualize associations controls
+```{r}
+sumTab_nb_controls_filt <- sumTab_nb_controls %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_nb_controls_filt)){
+
+  grp=sumTab_nb_controls_filt[[i,"drug_group"]]
+  ot=sumTab_nb_controls_filt[[i,"outcome"]]
+  pr=sumTab_nb_controls_filt[[i,"predictor"]]
+
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_cor=cor.test(mgb_subset[,pr],mgb_subset[,ot])
+
+    print(
+    ggplot(mgb_subset,
+           aes(x=get(pr),y=get(ot)))+
+      geom_point()+
+      geom_smooth(method="lm")+
+      xlab(pr)+ylab(ot)+
+      theme_classic()+
+      labs(subtitle = paste0("r=",signif(res_cor$estimate,2),", p=",signif(res_cor$p.value,2)))+
+      ggtitle(grp)
+    )
+}
+
+# for responsiveness
+sumTab_log_controls_filt <- sumTab_log_controls %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_log_controls_filt)){
+  
+  grp=sumTab_log_controls_filt[[i,"drug_group"]]
+  ot=sumTab_log_controls_filt[[i,"outcome"]]
+  pr=sumTab_log_controls_filt[[i,"predictor"]]
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_ttest=t.test(mgb_subset[,pr]~mgb_subset[,ot])
+
+    print(
+    ggplot(mgb_subset,
+           aes(x=as.factor(get(ot)),y=get(pr)))+
+      geom_boxplot()+
+      geom_violin()+
+      xlab(ot)+ylab(pr)+
+      theme_classic()+
+      labs(subtitle = paste0("p=",signif(res_ttest$p.value,2)))+
+      ggtitle(grp)
+    )
+}
+```
+
+# Visualize associations additional controls
+```{r}
+sumTab_nb_controls_filt2 <- sumTab_nb_controls2 %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_nb_controls_filt2)){
+
+  grp=sumTab_nb_controls_filt2[[i,"drug_group"]]
+  ot=sumTab_nb_controls_filt2[[i,"outcome"]]
+  pr=sumTab_nb_controls_filt2[[i,"predictor"]]
+
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_cor=cor.test(mgb_subset[,pr],mgb_subset[,ot])
+
+    print(
+    ggplot(mgb_subset,
+           aes(x=get(pr),y=get(ot)))+
+      geom_point()+
+      geom_smooth(method="lm")+
+      xlab(pr)+ylab(ot)+
+      theme_classic()+
+      labs(subtitle = paste0("r=",signif(res_cor$estimate,2),", p=",signif(res_cor$p.value,2)))+
+      ggtitle(grp)
+    )
+}
+
+# for responsiveness
+sumTab_log_controls_filt2 <- sumTab_log_controls2 %>% filter(pval < 0.1)
+for(i in 1:nrow(sumTab_log_controls_filt2)){
+  
+  grp=sumTab_log_controls_filt2[[i,"drug_group"]]
+  ot=sumTab_log_controls_filt2[[i,"outcome"]]
+  pr=sumTab_log_controls_filt2[[i,"predictor"]]
+  # correlation coefficient
+  mgb_subset=mgb %>% filter(initial_biologic_recoded==grp)
+  res_ttest=t.test(mgb_subset[,pr]~mgb_subset[,ot])
+
+    print(
+    ggplot(mgb_subset,
+           aes(x=as.factor(get(ot)),y=get(pr)))+
+      geom_boxplot()+
+      geom_violin()+
+      xlab(ot)+ylab(pr)+
+      theme_classic()+
+      labs(subtitle = paste0("p=",signif(res_ttest$p.value,2)))+
+      ggtitle(grp)
+    )
+}
+```
+
+
+# Session info
+```{r session info}
+
+
+sessionInfo()
+
+```
+
+
